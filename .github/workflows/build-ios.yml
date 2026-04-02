@@ -1,0 +1,92 @@
+name: Build iOS (Optimized)
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+  workflow_dispatch:               # 允许手动触发
+
+jobs:
+  build-ios:
+    runs-on: macos-latest
+    env:
+      BUILD_TYPE: Release          # 可改为 Debug
+      QT_VERSION: '6.7.3'
+      IOS_DEPLOYMENT_TARGET: '15.0'
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      # ---------- 缓存 Qt ----------
+      - name: Cache Qt
+        id: cache-qt
+        uses: actions/cache@v4
+        with:
+          path: ~/Qt
+          key: ${{ runner.os }}-Qt-${{ env.QT_VERSION }}-ios
+          restore-keys: |
+            ${{ runner.os }}-Qt-${{ env.QT_VERSION }}-ios
+
+      # ---------- 安装 Qt (如果缓存未命中) ----------
+      - name: Install Qt
+        uses: jurplel/install-qt-action@v4
+        with:
+          version: ${{ env.QT_VERSION }}
+          target: 'ios'
+          modules: 'qtcharts'
+          cached: ${{ steps.cache-qt.outputs.cache-hit }}
+          dir: ~/Qt
+
+      # ---------- 配置 CMake ----------
+      - name: Configure CMake
+        run: |
+          cmake -S . -B build \
+            -DCMAKE_SYSTEM_NAME=iOS \
+            -DCMAKE_OSX_ARCHITECTURES="arm64" \
+            -DCMAKE_BUILD_TYPE=${{ env.BUILD_TYPE }} \
+            -DCMAKE_XCODE_ATTRIBUTE_IPHONEOS_DEPLOYMENT_TARGET=${{ env.IOS_DEPLOYMENT_TARGET }}
+
+      # ---------- 编译 ----------
+      - name: Build
+        run: cmake --build build --config ${{ env.BUILD_TYPE }} -j $(sysctl -n hw.ncpu)
+
+      # ---------- 验证 .app ----------
+      - name: Verify .app
+        run: |
+          APP_PATH=$(find build -name "*.app" -type d | head -n 1)
+          echo "APP_PATH=$APP_PATH" >> $GITHUB_ENV
+          if [ -z "$APP_PATH" ]; then
+            echo "❌ 未找到 .app 文件"
+            exit 1
+          fi
+          echo "✅ 找到 .app: $APP_PATH"
+          lipo -info "$APP_PATH/SmartPunch" || true
+
+      # ---------- 打包成 IPA ----------
+      - name: Package to IPA
+        run: |
+          # 创建 Payload 目录
+          mkdir -p Payload
+          cp -R "$APP_PATH" Payload/
+          # 生成 IPA（zip 后改名）
+          zip -qr SmartPunch.ipa Payload
+          rm -rf Payload
+          echo "✅ IPA 打包完成"
+
+      # ---------- 上传产物 ----------
+      - name: Upload IPA artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: SmartPunch-iOS-${{ env.BUILD_TYPE }}
+          path: SmartPunch.ipa
+          if-no-files-found: error
+
+      # ---------- 上传 dSYM（用于崩溃分析）----------
+      - name: Upload dSYM
+        uses: actions/upload-artifact@v4
+        with:
+          name: SmartPunch-dSYM
+          path: build/*.dSYM
+          if-no-files-found: warn
